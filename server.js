@@ -90,32 +90,63 @@ async function checkOrderStatus(orderId) {
   return response.data;
 }
 
-// ===================== PAYMENT GATEWAY (xyzpay) =====================
-const GATEWAY_API_TOKEN = process.env.PAYMENT_API_TOKEN || '';
-const GATEWAY_BASE = 'https://api.xyzpay.site';
+// ===================== PAYMENT GATEWAY (xyzpay / Pay0.shop) =====================
+// Docs: https://xyzpay.site/auth/apidetails
+// IMPORTANT: payloads are application/x-www-form-urlencoded, field is "user_token"
+const GATEWAY_USER_TOKEN = process.env.PAYMENT_API_TOKEN || '';
+const GATEWAY_BASE = 'https://xyzpay.site/api';
+const SITE_URL = process.env.SITE_URL || 'https://laiztopup-17e14.web.app';
 
-async function createPaymentOrder({ orderId, amount, mobile }) {
-  const response = await axios.post(`${GATEWAY_BASE}/api/create-order`, {
-    token: GATEWAY_API_TOKEN,
-    orderId,
-    amount,
-    mobile,
-    returnUrl: `https://laiztopup-17e14.web.app/payment.html?orderId=${orderId}`,
+async function createPaymentOrder({ orderId, amount, mobile, remark1, remark2 }) {
+  const payload = new URLSearchParams({
+    customer_mobile: mobile,
+    user_token: GATEWAY_USER_TOKEN,
+    amount: String(amount),
+    order_id: orderId,
+    redirect_url: `${SITE_URL}/payment.html?orderId=${orderId}`,
+    remark1: remark1 || 'topup',
+    remark2: remark2 || 'laiz',
   });
-  if (response.data.success) {
-    return { success: true, paymentId: response.data.paymentId, paymentUrl: response.data.paymentUrl };
+
+  const response = await axios.post(`${GATEWAY_BASE}/create-order`, payload, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
+  if (response.data.status === true || response.data.status === 'true') {
+    return {
+      success: true,
+      orderId: response.data.result?.orderId,
+      paymentUrl: response.data.result?.payment_url,
+    };
   }
-  return { success: false, error: response.data.message || 'Failed' };
+  return { success: false, error: response.data.message || 'Failed to create order' };
 }
 
 async function checkPaymentStatus(orderId) {
-  const response = await axios.post(`${GATEWAY_BASE}/api/check-status`, {
-    token: GATEWAY_API_TOKEN,
-    orderId,
+  const payload = new URLSearchParams({
+    user_token: GATEWAY_USER_TOKEN,
+    order_id: orderId,
   });
-  return response.data.success
-    ? { status: response.data.status, transactionId: response.data.transactionId }
-    : { status: 'failed' };
+
+  const response = await axios.post(`${GATEWAY_BASE}/check-order-status`, payload, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
+  const result = response.data.result;
+  if (result && result.status === 'SUCCESS') {
+    return {
+      status: 'success',
+      txnStatus: result.txnStatus,
+      amount: result.amount,
+      date: result.date,
+      utr: result.utr,
+      orderId: result.orderId,
+    };
+  }
+  if (result && (result.status === 'PENDING' || result.txnStatus === 'PENDING')) {
+    return { status: 'pending' };
+  }
+  return { status: 'failed', error: response.data.message };
 }
 
 // ===================== ROUTES =====================
@@ -174,14 +205,13 @@ app.post('/api/payment/create', async (req, res) => {
     if (db && userId) {
       await db.collection('users').doc(userId).collection('orders').doc(orderId).set({
         amount, gameSlug, itemSlug, playerId, zoneId, mobile,
-        paymentId: paymentResult.paymentId,
         paymentUrl: paymentResult.paymentUrl,
         status: 'pending_payment',
         createdAt: new Date(),
       }, { merge: true });
     }
 
-    res.json({ success: true, paymentId: paymentResult.paymentId, paymentUrl: paymentResult.paymentUrl });
+    res.json({ success: true, orderId, paymentUrl: paymentResult.paymentUrl });
   } catch (e) {
     res.status(500).json({ error: e.response?.data?.message || e.message });
   }
